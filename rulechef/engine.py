@@ -1,14 +1,12 @@
 """Main RuleChef orchestrator"""
 
 import json
-import os
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-from datetime import datetime
+from typing import Dict, List, Optional
 
 from anthropic import Anthropic
 
-from rulechef.core import Task, Dataset, Example, Correction, Rule, RuleFormat, Span
+from rulechef.core import Task, Dataset, Example, Correction, Rule, RuleFormat
 from rulechef.learner import RuleLearner
 
 
@@ -21,7 +19,7 @@ class RuleChef:
         client: Optional[Anthropic] = None,
         dataset_name: str = "default",
         storage_path: str = "./rulechef_data",
-        allowed_formats: Optional[List[RuleFormat]] = None
+        allowed_formats: Optional[List[RuleFormat]] = None,
     ):
         self.task = task
         self.llm = client or Anthropic()
@@ -41,17 +39,14 @@ class RuleChef:
     # ========================================
 
     def add_example(
-        self,
-        input_data: Dict,
-        output_data: Dict,
-        source: str = "human_labeled"
+        self, input_data: Dict, output_data: Dict, source: str = "human_labeled"
     ):
         """Add a labeled training example"""
         example = Example(
             id=self._generate_id(),
             input=input_data,
             expected_output=output_data,
-            source=source
+            source=source,
         )
         self.dataset.examples.append(example)
         self._save_dataset()
@@ -62,7 +57,7 @@ class RuleChef:
         input_data: Dict,
         model_output: Dict,
         expected_output: Dict,
-        feedback: Optional[str] = None
+        feedback: Optional[str] = None,
     ):
         """Add a user correction (high value signal)"""
         correction = Correction(
@@ -70,7 +65,7 @@ class RuleChef:
             input=input_data,
             model_output=model_output,
             expected_output=expected_output,
-            feedback=feedback
+            feedback=feedback,
         )
         self.dataset.corrections.append(correction)
         self._save_dataset()
@@ -92,26 +87,54 @@ class RuleChef:
     # Learning
     # ========================================
 
-    def learn_rules(self, run_evaluation: bool = True, min_examples: int = 1):
+    def learn_rules(
+        self,
+        run_evaluation: Optional[bool] = None,
+        min_examples: int = 1,
+        max_refinement_iterations: int = 3,
+    ):
         """
         Learn rules from all collected data
 
         This is the core batch learning process
+
+        Args:
+            run_evaluation: Whether to run evaluation/refinement loop
+                - None (default): Auto-enable if total_data >= 3, disable otherwise
+                - True: Always enable refinement (3 iterations)
+                - False: Disable refinement (faster, synthesis only)
+            min_examples: Minimum training items required
+            max_refinement_iterations: Max iterations in refinement loop (1-3, default 3)
         """
+        import time
+
+        start_time = time.time()
 
         total_data = len(self.dataset.get_all_training_data())
 
         if total_data < min_examples:
             print(f"Need at least {min_examples} examples/corrections")
-            print(f"Currently have: {len(self.dataset.corrections)} corrections, "
-                  f"{len(self.dataset.examples)} examples")
+            print(
+                f"Currently have: {len(self.dataset.corrections)} corrections, "
+                f"{len(self.dataset.examples)} examples"
+            )
             return
 
-        print(f"\n{'='*60}")
+        # Smart default: disable evaluation for tiny datasets
+        if run_evaluation is None:
+            run_evaluation = total_data >= 3
+
+        print(f"\n{'=' * 60}")
         print(f"Learning rules from {total_data} training items")
         print(f"  Corrections: {len(self.dataset.corrections)} (high value)")
         print(f"  Examples: {len(self.dataset.examples)}")
-        print(f"{'='*60}\n")
+        if run_evaluation:
+            print(
+                f"  Mode: Synthesis + Refinement (max {max_refinement_iterations} iterations)"
+            )
+        else:
+            print("  Mode: Synthesis only (no refinement)")
+        print(f"{'=' * 60}\n")
 
         # Synthesize initial ruleset
         rules = self.learner.synthesize_ruleset(self.dataset)
@@ -124,7 +147,9 @@ class RuleChef:
 
         # Evaluate and refine
         if run_evaluation:
-            rules, metrics = self.learner.evaluate_and_refine(rules, self.dataset)
+            rules, metrics = self.learner.evaluate_and_refine(
+                rules, self.dataset, max_iterations=max_refinement_iterations
+            )
         else:
             metrics = {"accuracy": 0.0, "total": total_data, "correct": 0}
 
@@ -132,11 +157,16 @@ class RuleChef:
         self.dataset.rules = rules
         self._save_dataset()
 
-        print(f"\n{'='*60}")
-        print(f"Learning complete!")
+        elapsed = time.time() - start_time
+
+        print(f"\n{'=' * 60}")
+        print(f"Learning complete! ({elapsed:.1f}s)")
         print(f"  Rules: {len(rules)}")
-        print(f"  Accuracy: {metrics['accuracy']:.1%}")
-        print(f"{'='*60}\n")
+        if metrics["total"] > 0:
+            print(
+                f"  Accuracy: {metrics['accuracy']:.1%} ({metrics['correct']}/{metrics['total']})"
+            )
+        print(f"{'=' * 60}\n")
 
         return rules, metrics
 
@@ -176,8 +206,8 @@ class RuleChef:
         # Format input for prompt
         prompt = f"""Extract answer spans from the following:
 
-Question: {input_data.get('question', '')}
-Context: {input_data.get('context', '')}
+Question: {input_data.get("question", "")}
+Context: {input_data.get("context", "")}
 
 Return JSON:
 {{
@@ -190,7 +220,7 @@ Return JSON:
         response = self.llm.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=2000,
-            messages=[{"role": "user", "content": prompt}]
+            messages=[{"role": "user", "content": prompt}],
         )
 
         try:
@@ -218,29 +248,37 @@ Return JSON:
             "examples": len(self.dataset.examples),
             "feedback": len(self.dataset.feedback),
             "rules": len(self.dataset.rules),
-            "description": self.dataset.description
+            "description": self.dataset.description,
         }
 
     def get_rules_summary(self) -> List[Dict]:
         """Get formatted summary of learned rules"""
         summaries = []
         for rule in sorted(self.dataset.rules, key=lambda r: r.priority, reverse=True):
-            success_rate = (rule.successes / rule.times_applied * 100
-                           if rule.times_applied > 0 else 0)
-            summaries.append({
-                "name": rule.name,
-                "description": rule.description,
-                "format": rule.format.value,
-                "priority": rule.priority,
-                "confidence": f"{rule.confidence:.2f}",
-                "times_applied": rule.times_applied,
-                "success_rate": f"{success_rate:.1f}%" if rule.times_applied > 0 else "N/A"
-            })
+            success_rate = (
+                rule.successes / rule.times_applied * 100
+                if rule.times_applied > 0
+                else 0
+            )
+            summaries.append(
+                {
+                    "name": rule.name,
+                    "description": rule.description,
+                    "format": rule.format.value,
+                    "priority": rule.priority,
+                    "confidence": f"{rule.confidence:.2f}",
+                    "times_applied": rule.times_applied,
+                    "success_rate": f"{success_rate:.1f}%"
+                    if rule.times_applied > 0
+                    else "N/A",
+                }
+            )
         return summaries
 
     def _generate_id(self) -> str:
         """Generate unique ID"""
         import uuid
+
         return str(uuid.uuid4())[:8]
 
     # ========================================
@@ -250,7 +288,7 @@ Return JSON:
     def _save_dataset(self):
         """Save dataset to disk"""
         filepath = self.storage_path / f"{self.dataset.name}.json"
-        with open(filepath, 'w') as f:
+        with open(filepath, "w") as f:
             json.dump(self.dataset.to_dict(), f, indent=2, default=str)
 
     def _load_dataset(self):
@@ -261,7 +299,7 @@ Return JSON:
             return
 
         try:
-            with open(filepath, 'r') as f:
+            with open(filepath, "r") as f:
                 data = json.load(f)
 
             # Restore examples
@@ -271,7 +309,7 @@ Return JSON:
                     input=ex["input"],
                     expected_output=ex["expected_output"],
                     source=ex["source"],
-                    confidence=ex.get("confidence", 0.8)
+                    confidence=ex.get("confidence", 0.8),
                 )
                 self.dataset.examples.append(example)
 
@@ -282,7 +320,7 @@ Return JSON:
                     input=corr["input"],
                     model_output=corr["model_output"],
                     expected_output=corr["expected_output"],
-                    feedback=corr.get("feedback")
+                    feedback=corr.get("feedback"),
                 )
                 self.dataset.corrections.append(correction)
 
@@ -301,11 +339,13 @@ Return JSON:
                     confidence=rule_data.get("confidence", 0.5),
                     times_applied=rule_data.get("times_applied", 0),
                     successes=rule_data.get("successes", 0),
-                    failures=rule_data.get("failures", 0)
+                    failures=rule_data.get("failures", 0),
                 )
                 self.dataset.rules.append(rule)
 
-            print(f"✓ Loaded dataset: {len(self.dataset.corrections)} corrections, {len(self.dataset.examples)} examples")
+            print(
+                f"✓ Loaded dataset: {len(self.dataset.corrections)} corrections, {len(self.dataset.examples)} examples"
+            )
 
         except Exception as e:
             print(f"Error loading dataset: {e}")

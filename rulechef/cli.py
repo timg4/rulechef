@@ -21,35 +21,35 @@ def main():
         name="Q&A",
         description="Extract answer spans from text",
         input_schema={"question": "str", "context": "str"},
-        output_schema={"spans": "List[Span]"}
+        output_schema={"spans": "List[Span]"},
     )
 
     chef = RuleChef(task, client)
 
     # Main menu
     while True:
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("RuleChef - Learn extraction rules")
-        print("="*60)
+        print("=" * 60)
         print("[a]dd example     [e]xtract     [g]enerate examples")
         print("[l]earn rules     [r]ules       [s]tats     [q]uit")
-        print("="*60)
+        print("=" * 60)
 
         choice = input("\nChoice: ").strip().lower()
 
-        if choice in ['a', 'add']:
+        if choice in ["a", "add"]:
             _add_example(chef)
-        elif choice in ['e', 'extract']:
+        elif choice in ["e", "extract"]:
             _extract(chef)
-        elif choice in ['g', 'generate']:
+        elif choice in ["g", "generate"]:
             _generate_examples(chef)
-        elif choice in ['l', 'learn']:
+        elif choice in ["l", "learn"]:
             _learn_rules(chef)
-        elif choice in ['r', 'rules']:
+        elif choice in ["r", "rules"]:
             _view_rules(chef)
-        elif choice in ['s', 'stats']:
+        elif choice in ["s", "stats"]:
             _view_stats(chef)
-        elif choice in ['q', 'quit']:
+        elif choice in ["q", "quit"]:
             print("Goodbye!")
             break
         else:
@@ -75,11 +75,7 @@ def _add_example(chef: RuleChef):
 
     chef.add_example(
         {"question": question, "context": context},
-        {
-            "spans": [
-                {"text": answer_text, "start": answer_start, "end": answer_end}
-            ]
-        }
+        {"spans": [{"text": answer_text, "start": answer_start, "end": answer_end}]},
     )
 
 
@@ -106,15 +102,23 @@ def _extract(chef: RuleChef):
     # Ask for correction if needed
     if spans:
         correct = input("\nCorrect? (y/n): ").strip().lower()
-        if correct != 'y':
+        if correct != "y":
             expected_text = input("Correct answer: ").strip()
             expected_start = int(input("Start: "))
             expected_end = int(input("End: "))
             chef.add_correction(
                 {"question": question, "context": context},
                 result,
-                {"spans": [{"text": expected_text, "start": expected_start, "end": expected_end}]},
-                input("Feedback (optional): ").strip() or None
+                {
+                    "spans": [
+                        {
+                            "text": expected_text,
+                            "start": expected_start,
+                            "end": expected_end,
+                        }
+                    ]
+                },
+                input("Feedback (optional): ").strip() or None,
             )
 
 
@@ -127,14 +131,14 @@ def _generate_examples(chef: RuleChef):
 def _learn_rules(chef: RuleChef):
     """Learn rules"""
     stats = chef.get_stats()
-    total = stats['corrections'] + stats['examples']
+    total = stats["corrections"] + stats["examples"]
 
     if total < 1:
         print(f"Need at least 1 training item (have {total})")
         return
 
     confirm = input(f"\nLearn from {total} items? (y/n): ").strip().lower()
-    if confirm != 'y':
+    if confirm != "y":
         return
 
     chef.learn_rules(run_evaluation=True)

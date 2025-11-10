@@ -4,11 +4,11 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from enum import Enum
-import uuid
 
 
 class RuleFormat(Enum):
     """Rule representation formats"""
+
     REGEX = "regex"
     CODE = "code"
 
@@ -16,6 +16,7 @@ class RuleFormat(Enum):
 @dataclass
 class Span:
     """A text span with position"""
+
     text: str
     start: int
     end: int
@@ -40,7 +41,7 @@ class Span:
             "text": self.text,
             "start": self.start,
             "end": self.end,
-            "score": self.score
+            "score": self.score,
         }
 
 
@@ -50,6 +51,7 @@ class Task:
     Abstract task definition
     Describes what we're trying to accomplish
     """
+
     name: str
     description: str  # Free text description
     input_schema: Dict[str, str]
@@ -60,7 +62,7 @@ class Task:
             "name": self.name,
             "description": self.description,
             "input_schema": self.input_schema,
-            "output_schema": self.output_schema
+            "output_schema": self.output_schema,
         }
 
 
@@ -70,6 +72,7 @@ class Example:
     Regular training example
     Lower priority than corrections
     """
+
     id: str
     input: Dict[str, Any]
     expected_output: Dict[str, Any]
@@ -83,7 +86,7 @@ class Example:
             "input": self.input,
             "expected_output": self.expected_output,
             "source": self.source,
-            "confidence": self.confidence
+            "confidence": self.confidence,
         }
 
 
@@ -93,6 +96,7 @@ class Correction:
     User correction - HIGHEST value signal
     Contains both wrong output and correct output
     """
+
     id: str
     input: Dict[str, Any]
     model_output: Dict[str, Any]  # What was WRONG
@@ -106,13 +110,14 @@ class Correction:
             "input": self.input,
             "model_output": self.model_output,
             "expected_output": self.expected_output,
-            "feedback": self.feedback
+            "feedback": self.feedback,
         }
 
 
 @dataclass
 class Rule:
     """Learned extraction rule"""
+
     id: str
     name: str
     description: str
@@ -150,13 +155,14 @@ class Rule:
             "times_applied": self.times_applied,
             "successes": self.successes,
             "failures": self.failures,
-            "created_at": self.created_at.isoformat()
+            "created_at": self.created_at.isoformat(),
         }
 
 
 @dataclass
 class Dataset:
     """Complete training dataset"""
+
     name: str
     task: Task
     description: str = ""
@@ -179,5 +185,5 @@ class Dataset:
             "corrections": [c.to_dict() for c in self.corrections],
             "feedback": self.feedback,
             "rules": [r.to_dict() for r in self.rules],
-            "version": self.version
+            "version": self.version,
         }

@@ -11,7 +11,9 @@ from rulechef.core import Rule, RuleFormat, Span, Dataset, Correction
 class RuleLearner:
     """Learns extraction rules from examples using LLM"""
 
-    def __init__(self, llm: Anthropic, allowed_formats: Optional[List[RuleFormat]] = None):
+    def __init__(
+        self, llm: Anthropic, allowed_formats: Optional[List[RuleFormat]] = None
+    ):
         self.llm = llm
         self.allowed_formats = allowed_formats or [RuleFormat.REGEX, RuleFormat.CODE]
 
@@ -21,19 +23,18 @@ class RuleLearner:
 
     def synthesize_ruleset(self, dataset: Dataset, max_rules: int = 10) -> List[Rule]:
         """Generate initial ruleset from dataset"""
+        import time
 
         prompt = self._build_synthesis_prompt(dataset, max_rules)
 
         print("📚 Synthesizing rules from dataset...")
-        print(f"   Corrections: {len(dataset.corrections)}")
-        print(f"   Examples: {len(dataset.examples)}")
-        print(f"   Feedback: {len(dataset.feedback)}")
 
+        start = time.time()
         try:
             response = self.llm.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=4000,
-                messages=[{"role": "user", "content": prompt}]
+                messages=[{"role": "user", "content": prompt}],
             )
 
             result = self._parse_json(response.content[0].text)
@@ -45,16 +46,18 @@ class RuleLearner:
 
                 # Skip rules not in allowed formats
                 if rule_format not in self.allowed_formats:
-                    print(f"   ⚠ Skipped {rule_format.value} rule (not allowed): {rule_data.get('name', f'Rule {i+1}')}")
+                    print(
+                        f"   ⚠ Skipped {rule_format.value} rule (not allowed): {rule_data.get('name', f'Rule {i + 1}')}"
+                    )
                     continue
 
                 rule = Rule(
                     id=self._generate_id(),
-                    name=rule_data.get("name", f"Rule {i+1}"),
+                    name=rule_data.get("name", f"Rule {i + 1}"),
                     description=rule_data.get("description", ""),
                     format=rule_format,
                     content=rule_data.get("content", ""),
-                    priority=rule_data.get("priority", 5)
+                    priority=rule_data.get("priority", 5),
                 )
                 # Validate rule before adding
                 if self._validate_rule(rule):
@@ -62,6 +65,8 @@ class RuleLearner:
                 else:
                     print(f"   ⚠ Skipped invalid rule: {rule.name}")
 
+            elapsed = time.time() - start
+            print(f"✓ Synthesized {len(rules)} rules ({elapsed:.1f}s)")
             return rules
 
         except Exception as e:
@@ -81,7 +86,9 @@ Output schema: {dataset.task.output_schema}
 
         # Add corrections (highest priority)
         if dataset.corrections:
-            prompt += f"CORRECTIONS (Learn from failures - these show what went wrong):\n"
+            prompt += (
+                "CORRECTIONS (Learn from failures - these show what went wrong):\n"
+            )
             for corr in dataset.corrections[:5]:
                 prompt += f"\nInput: {json.dumps(corr.input)}\n"
                 prompt += f"Got (WRONG): {json.dumps(corr.model_output)}\n"
@@ -91,14 +98,14 @@ Output schema: {dataset.task.output_schema}
 
         # Add examples
         if dataset.examples:
-            prompt += f"\nTRAINING EXAMPLES:\n"
+            prompt += "\nTRAINING EXAMPLES:\n"
             for ex in dataset.examples[:5]:
                 prompt += f"\nInput: {json.dumps(ex.input)}\n"
                 prompt += f"Output: {json.dumps(ex.expected_output)}\n"
 
         # Add feedback
         if dataset.feedback:
-            prompt += f"\n\nUSER FEEDBACK:\n"
+            prompt += "\n\nUSER FEEDBACK:\n"
             for fb in dataset.feedback:
                 prompt += f"- {fb}\n"
 
@@ -129,8 +136,8 @@ Return JSON:
     {{
       "name": "Short rule name",
       "description": "What this rule does",
-      "format": "regex"{' or "code"' if RuleFormat.CODE in self.allowed_formats else ''},
-      "content": "regex pattern{' OR python code' if RuleFormat.CODE in self.allowed_formats else ''}",
+      "format": "regex"{' or "code"' if RuleFormat.CODE in self.allowed_formats else ""},
+      "content": "regex pattern{" OR python code" if RuleFormat.CODE in self.allowed_formats else ""}",
       "priority": 1-10 (higher = more important),
       "reasoning": "Why this rule is needed"
     }}
@@ -169,26 +176,28 @@ IMPORTANT: Return ONLY valid JSON. Ensure:
     # ========================================
 
     def evaluate_and_refine(
-        self,
-        rules: List[Rule],
-        dataset: Dataset,
-        max_iterations: int = 3
+        self, rules: List[Rule], dataset: Dataset, max_iterations: int = 3
     ) -> tuple:
         """Evaluate rules and refine through agentic loop"""
+        import time
 
-        print(f"\n🔄 Starting agentic refinement (max {max_iterations} iterations)...")
+        print(f"\n🔄 Refinement loop (max {max_iterations} iterations)")
 
         best_rules = rules
         best_accuracy = 0.0
+        results = None
 
         for iteration in range(max_iterations):
-            print(f"\n--- Iteration {iteration + 1} ---")
+            iter_num = iteration + 1
+            print(f"[{iter_num}/{max_iterations}] Evaluating rules...")
 
             # Evaluate
             results = self._evaluate_rules(rules, dataset)
             accuracy = results["accuracy"]
 
-            print(f"Accuracy: {accuracy:.1%} ({results['correct']}/{results['total']})")
+            print(
+                f"[{iter_num}/{max_iterations}] Accuracy: {accuracy:.1%} ({results['correct']}/{results['total']})"
+            )
 
             if accuracy > best_accuracy:
                 best_rules = rules
@@ -201,13 +210,28 @@ IMPORTANT: Return ONLY valid JSON. Ensure:
 
             # Refine based on failures
             if results["failures"]:
-                print(f"Refining based on {len(results['failures'])} failures...")
+                print(
+                    f"[{iter_num}/{max_iterations}] Refining based on {len(results['failures'])} failures..."
+                )
+                start = time.time()
                 rules = self._refine_rules(rules, results["failures"], dataset)
+                elapsed = time.time() - start
                 if not rules:
                     print("⚠ Refinement failed, keeping best rules")
                     rules = best_rules
+                else:
+                    print(
+                        f"[{iter_num}/{max_iterations}] Refined {len(rules)} rules ({elapsed:.1f}s)"
+                    )
+            else:
+                print("✓ No failures to fix!")
+                break
 
-        return best_rules, {"accuracy": best_accuracy, "total": results["total"], "correct": int(best_accuracy * results["total"])}
+        return best_rules, {
+            "accuracy": best_accuracy,
+            "total": results["total"],
+            "correct": int(best_accuracy * results["total"]),
+        }
 
     def _evaluate_rules(self, rules: List[Rule], dataset: Dataset) -> Dict:
         """Test rules on all training data"""
@@ -225,18 +249,20 @@ IMPORTANT: Return ONLY valid JSON. Ensure:
             # Check correctness
             if self._outputs_match(extracted, expected):
                 correct += 1
-                if hasattr(item, 'update_stats'):
+                if hasattr(item, "update_stats"):
                     # Update rule stats
                     for rule in rules:
                         rule.update_stats(True)
             else:
-                failures.append({
-                    "input": item.input,
-                    "expected": expected,
-                    "got": extracted,
-                    "is_correction": isinstance(item, Correction)
-                })
-                if hasattr(item, 'update_stats'):
+                failures.append(
+                    {
+                        "input": item.input,
+                        "expected": expected,
+                        "got": extracted,
+                        "is_correction": isinstance(item, Correction),
+                    }
+                )
+                if hasattr(item, "update_stats"):
                     for rule in rules:
                         rule.update_stats(False)
 
@@ -244,22 +270,17 @@ IMPORTANT: Return ONLY valid JSON. Ensure:
             "total": total,
             "correct": correct,
             "accuracy": correct / total if total > 0 else 0.0,
-            "failures": failures
+            "failures": failures,
         }
 
     def _refine_rules(
-        self,
-        current_rules: List[Rule],
-        failures: List[Dict],
-        dataset: Dataset
+        self, current_rules: List[Rule], failures: List[Dict], dataset: Dataset
     ) -> Optional[List[Rule]]:
         """Refine rules based on failures"""
 
         # Prioritize correction failures
         priority_failures = sorted(
-            failures,
-            key=lambda f: f.get("is_correction", False),
-            reverse=True
+            failures, key=lambda f: f.get("is_correction", False), reverse=True
         )
 
         prompt = f"""You previously generated these rules:
@@ -273,7 +294,7 @@ Refine the ruleset to fix these failures while maintaining performance on other 
 
 CRITICAL: Pay special attention to correction failures (is_correction: true) - these are user-verified mistakes.
 
-Allowed rule formats: {', '.join(fmt.value for fmt in self.allowed_formats)}
+Allowed rule formats: {", ".join(fmt.value for fmt in self.allowed_formats)}
 """
 
         if RuleFormat.CODE in self.allowed_formats:
@@ -293,7 +314,7 @@ Return refined ruleset in same JSON format:
             response = self.llm.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=4000,
-                messages=[{"role": "user", "content": prompt}]
+                messages=[{"role": "user", "content": prompt}],
             )
 
             result = self._parse_json(response.content[0].text)
@@ -305,7 +326,9 @@ Return refined ruleset in same JSON format:
 
                 # Skip rules not in allowed formats
                 if rule_format not in self.allowed_formats:
-                    print(f"   ⚠ Skipped {rule_format.value} rule (not allowed): {rule_data.get('name', 'Refined rule')}")
+                    print(
+                        f"   ⚠ Skipped {rule_format.value} rule (not allowed): {rule_data.get('name', 'Refined rule')}"
+                    )
                     continue
 
                 rule = Rule(
@@ -314,7 +337,7 @@ Return refined ruleset in same JSON format:
                     description=rule_data.get("description", ""),
                     format=rule_format,
                     content=rule_data.get("content", ""),
-                    priority=rule_data.get("priority", 5)
+                    priority=rule_data.get("priority", 5),
                 )
                 # Validate rule before adding
                 if self._validate_rule(rule):
@@ -337,7 +360,7 @@ Return refined ruleset in same JSON format:
             try:
                 spans = self._execute_rule(rule, input_data)
                 all_spans.extend(spans)
-            except Exception as e:
+            except Exception:
                 # Rules should have been validated during learning, but warn if they fail
                 # This might indicate invalid saved rules or edge cases
                 pass
@@ -365,12 +388,14 @@ Return refined ruleset in same JSON format:
         spans = []
 
         for match in pattern.finditer(context):
-            spans.append(Span(
-                text=match.group(),
-                start=match.start(),
-                end=match.end(),
-                score=rule.confidence
-            ))
+            spans.append(
+                Span(
+                    text=match.group(),
+                    start=match.start(),
+                    end=match.end(),
+                    score=rule.confidence,
+                )
+            )
 
         return spans
 
@@ -397,16 +422,16 @@ Return refined ruleset in same JSON format:
                             text=result.get("text", ""),
                             start=result.get("start", 0),
                             end=result.get("end", 0),
-                            score=result.get("score", rule.confidence)
+                            score=result.get("score", rule.confidence),
                         )
                         spans.append(span)
                     else:
                         # Already a Span object
-                        if not hasattr(result, 'score'):
+                        if not hasattr(result, "score"):
                             result.score = rule.confidence
                         spans.append(result)
                 return spans
-        except Exception as e:
+        except Exception:
             # Rules are validated during learning, so execution errors are rare
             # but silently continue to next rule
             pass
@@ -423,12 +448,14 @@ Return refined ruleset in same JSON format:
         span_objects = []
         for s in spans:
             if isinstance(s, dict):
-                span_objects.append(Span(
-                    text=s["text"],
-                    start=s["start"],
-                    end=s["end"],
-                    score=s.get("score", 0.5)
-                ))
+                span_objects.append(
+                    Span(
+                        text=s["text"],
+                        start=s["start"],
+                        end=s["end"],
+                        score=s.get("score", 0.5),
+                    )
+                )
             else:
                 span_objects.append(s)
 
@@ -464,7 +491,9 @@ Return refined ruleset in same JSON format:
     def _format_output(self, output: Dict) -> str:
         """Format output for prompt"""
         spans = output.get("spans", [])
-        return json.dumps([{"text": s["text"], "start": s["start"], "end": s["end"]} for s in spans])
+        return json.dumps(
+            [{"text": s["text"], "start": s["start"], "end": s["end"]} for s in spans]
+        )
 
     def _format_rules(self, rules: List[Rule]) -> str:
         """Format rules for display"""
@@ -517,7 +546,7 @@ Example #{seed + 1}:"""
         response = self.llm.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=500,
-            messages=[{"role": "user", "content": prompt}]
+            messages=[{"role": "user", "content": prompt}],
         )
 
         text = response.content[0].text
@@ -539,10 +568,10 @@ Example #{seed + 1}:"""
                 re.compile(rule.content)
             elif rule.format == RuleFormat.CODE:
                 # Test syntax of Python code
-                compile(rule.content, '<string>', 'exec')
+                compile(rule.content, "<string>", "exec")
                 # Also check that extract function is defined
-                if 'def extract(' not in rule.content:
-                    print(f"      Code rule must define extract() function")
+                if "def extract(" not in rule.content:
+                    print("      Code rule must define extract() function")
                     return False
             return True
         except re.error as e:
@@ -558,4 +587,5 @@ Example #{seed + 1}:"""
     def _generate_id(self) -> str:
         """Generate unique ID"""
         import uuid
+
         return str(uuid.uuid4())[:8]
