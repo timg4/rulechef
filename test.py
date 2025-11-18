@@ -5,7 +5,9 @@ from rulechef import RuleChef, Task
 from rulechef.core import RuleFormat
 
 # Setup
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+api_key = os.environ.get("GROQ_API_KEY")
+client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1/")
+
 task = Task(
     name="Q&A",
     description="Extract answer spans from text",
@@ -13,7 +15,12 @@ task = Task(
     output_schema={"spans": "List[Span]"},
 )
 
-chef = RuleChef(task, client, allowed_formats=[RuleFormat.REGEX])
+chef = RuleChef(
+    task,
+    client,
+    allowed_formats=[RuleFormat.REGEX],
+    model="moonshotai/kimi-k2-instruct-0905",
+)
 
 # Add examples
 chef.add_example(
