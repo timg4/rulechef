@@ -2,10 +2,10 @@
 
 import json
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Callable, Any
 from openai import OpenAI
 
-from rulechef.core import Rule, RuleFormat, Span, Dataset, Correction
+from rulechef.core import Rule, RuleFormat, Span, Dataset, Correction, TaskType
 
 
 class RuleLearner:
@@ -263,6 +263,9 @@ RULES CAN BE:"""
         if RuleFormat.CODE in self.allowed_formats:
             prompt += "\n- Python code (for complex logic)"
 
+        prompt += "\n\nIMPORTANT: You must ONLY use the allowed formats listed above. Do NOT generate rules in other formats."
+        prompt += "\nIMPORTANT: For CODE rules, write standard multi-line Python functions with proper indentation. Do NOT write one-liners."
+
         prompt += f"""
 
 Return JSON:
@@ -283,7 +286,8 @@ Return JSON:
 """
 
         if RuleFormat.CODE in self.allowed_formats:
-            prompt += """
+            if dataset.task.type == TaskType.EXTRACTION:
+                prompt += """
 For CODE format, provide a function that takes input dict and returns list of dicts:
 ```python
 def extract(input_data):
@@ -293,6 +297,28 @@ def extract(input_data):
     spans = []
     # your logic here
     return spans
+```
+"""
+            elif dataset.task.type == TaskType.CLASSIFICATION:
+                prompt += """
+For CODE format, provide a function that takes input dict and returns a string label:
+```python
+def extract(input_data):
+    # input_data is dict with keys from input_schema
+    # return string label (e.g. "POSITIVE", "SPAM")
+    if "bad" in input_data["text"]:
+        return "SPAM"
+    return "HAM"
+```
+"""
+            else:
+                prompt += """
+For CODE format, provide a function that takes input dict and returns the transformed output:
+```python
+def extract(input_data):
+    # input_data is dict with keys from input_schema
+    # return transformed data (dict, string, etc)
+    return input_data["text"].upper()
 ```
 """
 
@@ -384,7 +410,7 @@ IMPORTANT: Return ONLY valid JSON. Ensure:
             expected = item.expected_output
 
             # Check correctness
-            if self._outputs_match(extracted, expected):
+            if self._outputs_match(extracted, expected, dataset.task.type):
                 correct += 1
                 if hasattr(item, "update_stats"):
                     # Update rule stats
@@ -488,21 +514,55 @@ Return refined ruleset in same JSON format:
     def _apply_rules(self, rules: List[Rule], input_data: Dict) -> Dict:
         """Apply rules to input and return output"""
 
-        all_spans = []
+        # Sort by priority
+        sorted_rules = sorted(rules, key=lambda r: r.priority, reverse=True)
 
-        for rule in sorted(rules, key=lambda r: r.priority, reverse=True):
+        # For Extraction: Aggregate spans from all rules
+        # (This assumes rules are additive)
+        if (
+            not rules or rules[0].format == RuleFormat.REGEX
+        ):  # Heuristic check or pass task_type?
+            # Ideally we should pass task_type here, but for now let's infer from return type
+            # Or better, just handle the list return type
+            pass
+
+        # We need to know the task type here, but _apply_rules signature doesn't have it.
+        # However, we can infer from the result of the first successful rule.
+
+        all_results = []
+        for rule in sorted_rules:
             try:
-                spans = self._execute_rule(rule, input_data)
-                all_spans.extend(spans)
+                result = self._execute_rule(rule, input_data)
+                if result is not None:
+                    all_results.append(result)
             except Exception:
-                # Rules should have been validated during learning, but warn if they fail
-                # This might indicate invalid saved rules or edge cases
                 pass
 
-        # Deduplicate
-        unique_spans = self._deduplicate_spans(all_spans)
+        if not all_results:
+            return {}
 
-        return {"spans": [s.to_dict() for s in unique_spans]}
+        # Check type of first result to decide aggregation strategy
+        first_result = all_results[0]
+
+        if isinstance(first_result, list) and (
+            not first_result or isinstance(first_result[0], Span)
+        ):
+            # It's a list of Spans (Extraction)
+            all_spans = []
+            for res in all_results:
+                if isinstance(res, list):
+                    all_spans.extend(res)
+
+            unique_spans = self._deduplicate_spans(all_spans)
+            return {"spans": [s.to_dict() for s in unique_spans]}
+
+        elif isinstance(first_result, str):
+            # Classification (Label) - Return highest priority match
+            return {"label": first_result}
+
+        else:
+            # Transformation / Generic JSON - Return highest priority match
+            return first_result
 
     def _execute_rule(self, rule: Rule, input_data: Dict) -> List[Span]:
         """Execute a single rule"""
@@ -533,7 +593,7 @@ Return refined ruleset in same JSON format:
 
         return spans
 
-    def _execute_code_rule(self, rule: Rule, input_data: Dict) -> List[Span]:
+    def _execute_code_rule(self, rule: Rule, input_data: Dict) -> Any:
         """Execute code rule"""
 
         try:
@@ -543,34 +603,13 @@ Return refined ruleset in same JSON format:
 
             if extract_func:
                 results = extract_func(input_data)
-                # Handle case where results is not a list (e.g., returns a string)
-                if not isinstance(results, list):
-                    return []
-
-                # Convert dicts to Span objects and ensure all have scores
-                spans = []
-                for result in results:
-                    if isinstance(result, dict):
-                        # Convert dict to Span object
-                        span = Span(
-                            text=result.get("text", ""),
-                            start=result.get("start", 0),
-                            end=result.get("end", 0),
-                            score=result.get("score", rule.confidence),
-                        )
-                        spans.append(span)
-                    else:
-                        # Already a Span object
-                        if not hasattr(result, "score"):
-                            result.score = rule.confidence
-                        spans.append(result)
-                return spans
+                return results
         except Exception:
             # Rules are validated during learning, so execution errors are rare
             # but silently continue to next rule
             pass
 
-        return []
+        return None
 
     def _deduplicate_spans(self, spans: List[Span]) -> List[Span]:
         """Remove overlapping spans"""
@@ -607,20 +646,37 @@ Return refined ruleset in same JSON format:
 
         return unique[:5]
 
-    def _outputs_match(self, output1: Dict, output2: Dict) -> bool:
-        """Check if two outputs match"""
+    def _outputs_match(
+        self, output1: Dict, output2: Dict, task_type: TaskType = TaskType.EXTRACTION
+    ) -> bool:
+        """Check if two outputs match based on task type"""
 
-        spans1 = output1.get("spans", [])
-        spans2 = output2.get("spans", [])
+        if task_type == TaskType.EXTRACTION:
+            spans1 = output1.get("spans", [])
+            spans2 = output2.get("spans", [])
 
-        if len(spans1) != len(spans2):
-            return False
+            if len(spans1) != len(spans2):
+                return False
 
-        # Check text match (order independent)
-        texts1 = sorted([s["text"] if isinstance(s, dict) else s.text for s in spans1])
-        texts2 = sorted([s["text"] if isinstance(s, dict) else s.text for s in spans2])
+            # Check text match (order independent)
+            texts1 = sorted(
+                [s["text"] if isinstance(s, dict) else s.text for s in spans1]
+            )
+            texts2 = sorted(
+                [s["text"] if isinstance(s, dict) else s.text for s in spans2]
+            )
 
-        return texts1 == texts2
+            return texts1 == texts2
+
+        elif task_type == TaskType.CLASSIFICATION:
+            # Compare labels (case insensitive)
+            label1 = str(output1.get("label", "")).lower().strip()
+            label2 = str(output2.get("label", "")).lower().strip()
+            return label1 == label2
+
+        else:
+            # Transformation / Other: Exact match
+            return output1 == output2
 
     def _format_output(self, output: Dict) -> str:
         """Format output for prompt"""
@@ -712,6 +768,7 @@ Example #{seed + 1}:"""
             return False
         except SyntaxError as e:
             print(f"      Python syntax error: {e}")
+            print(f"      Content: {rule.content[:200]}...")
             return False
         except Exception as e:
             print(f"      Validation error: {e}")

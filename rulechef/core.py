@@ -45,6 +45,14 @@ class Span:
         }
 
 
+class TaskType(Enum):
+    """Type of task being performed"""
+
+    EXTRACTION = "extraction"  # Returns List[Span]
+    CLASSIFICATION = "classification"  # Returns str (Label)
+    TRANSFORMATION = "transformation"  # Returns Any (JSON/String)
+
+
 @dataclass
 class Task:
     """
@@ -56,6 +64,7 @@ class Task:
     description: str  # Free text description
     input_schema: Dict[str, str]
     output_schema: Dict[str, str]
+    type: TaskType = TaskType.EXTRACTION
 
     def to_dict(self) -> dict:
         return {
@@ -63,6 +72,7 @@ class Task:
             "description": self.description,
             "input_schema": self.input_schema,
             "output_schema": self.output_schema,
+            "type": self.type.value,
         }
 
 

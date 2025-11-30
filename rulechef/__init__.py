@@ -8,6 +8,7 @@ from rulechef.core import (
     Correction,
     Span,
     Rule,
+    TaskType,
 )
 
 __version__ = "0.1.0"
@@ -19,4 +20,5 @@ __all__ = [
     "Correction",
     "Span",
     "Rule",
+    "TaskType",
 ]

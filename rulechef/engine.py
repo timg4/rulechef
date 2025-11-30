@@ -4,11 +4,11 @@ import json
 import time
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, Any
 
 from openai import OpenAI
 
-from rulechef.core import Task, Dataset, Example, Correction, Rule, RuleFormat
+from rulechef.core import Task, Dataset, Example, Correction, Rule, RuleFormat, TaskType
 from rulechef.learner import RuleLearner
 from rulechef.buffer import ExampleBuffer
 from rulechef.coordinator import CoordinatorProtocol, SimpleCoordinator
@@ -310,20 +310,29 @@ class RuleChef:
         self.current_extraction = output
 
         # Check confidence
-        spans = output.get("spans", [])
-        if spans:
-            avg_confidence = sum(s.get("score", 0.5) for s in spans) / len(spans)
-            if avg_confidence < 0.3:
-                print(f"Low confidence ({avg_confidence:.1%}), using LLM fallback...")
-                return self._execute_with_llm(input_data)
+        if self.task.type == TaskType.EXTRACTION:
+            spans = output.get("spans", [])
+            if spans:
+                avg_confidence = sum(s.get("score", 0.5) for s in spans) / len(spans)
+                if avg_confidence < 0.3:
+                    print(
+                        f"Low confidence ({avg_confidence:.1%}), using LLM fallback..."
+                    )
+                    return self._execute_with_llm(input_data)
+
+        # For other types, we assume rule execution is binary (success/fail)
+        # If output is empty/None, fallback
+        if not output:
+            return self._execute_with_llm(input_data)
 
         return output
 
-    def _execute_with_llm(self, input_data: Dict) -> Dict:
+    def _execute_with_llm(self, input_data: Dict) -> Any:
         """Execute extraction using LLM directly"""
 
-        # Format input for prompt
-        prompt = f"""Extract answer spans from the following:
+        if self.task.type == TaskType.EXTRACTION:
+            # Format input for prompt
+            prompt = f"""Extract answer spans from the following:
 
 Question: {input_data.get("question", "")}
 Context: {input_data.get("context", "")}
@@ -333,6 +342,21 @@ Return JSON:
   "spans": [
     {{"text": "...", "start": 0, "end": 10}}
   ]
+}}
+"""
+        else:
+            # Generic prompt for other tasks
+            prompt = f"""Task: {self.task.name}
+Description: {self.task.description}
+
+Input: {json.dumps(input_data)}
+
+Return JSON matching this schema:
+{self.task.output_schema}
+
+Example JSON:
+{{
+  "label": "SPAM"
 }}
 """
 
@@ -351,7 +375,7 @@ Return JSON:
             return json.loads(text.strip())
         except Exception as e:
             print(f"Error in LLM extraction: {e}")
-            return {"spans": []}
+            return {"spans": []} if self.task.type == TaskType.EXTRACTION else {}
 
     # ========================================
     # Observation Mode (LLM Middleware)

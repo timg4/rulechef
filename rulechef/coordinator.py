@@ -193,29 +193,86 @@ class SimpleCoordinator(CoordinatorProtocol):
 # Placeholder for future agentic implementation
 class AgenticCoordinator(CoordinatorProtocol):
     """
-    Pydantic AI-based intelligent coordinator.
+    LLM-based intelligent coordinator.
 
-    Future implementation will use LLM to make adaptive decisions:
+    Uses LLM to make adaptive decisions:
     - Analyze buffer patterns to detect when learning would be beneficial
     - Choose optimal sampling strategy based on data characteristics
     - Decide iteration count based on learning progress
     - Provide detailed reasoning for decisions
     """
 
-    def __init__(self, llm_client):
-        raise NotImplementedError(
-            "AgenticCoordinator not yet implemented. "
-            "Use SimpleCoordinator for now. "
-            "This is a placeholder to show the swappable interface design."
-        )
+    def __init__(
+        self,
+        llm_client: Any,
+        model: str = "gpt-4o-mini",
+        min_batch_size: int = 5,
+        min_correction_batch: int = 1,
+        verbose: bool = True,
+    ):
+        """
+        Args:
+            llm_client: OpenAI client
+            model: Model to use for coordination
+            min_batch_size: Minimum new examples before asking LLM
+            min_correction_batch: Minimum corrections before asking LLM
+            verbose: Print coordination decisions
+        """
+        self.llm = llm_client
+        self.model = model
+        self.min_batch_size = min_batch_size
+        self.min_correction_batch = min_correction_batch
+        self.verbose = verbose
 
     def should_trigger_learning(
         self, buffer: "ExampleBuffer", current_rules: Optional[List["Rule"]]
     ) -> CoordinationDecision:
-        raise NotImplementedError()
+        """Agentic decision based on buffer content"""
+        stats = buffer.get_stats()
+        new_examples_count = stats["new_examples"]
+        corrections_count = stats["new_corrections"]
+
+        # 1. Fast path: Don't bother LLM if not enough data
+        # Unless we have corrections (high value) or it's the very first learn
+        if current_rules is None:
+            if new_examples_count < self.min_batch_size:
+                return CoordinationDecision(
+                    should_learn=False,
+                    strategy="balanced",
+                    reasoning=f"Waiting for initial batch (have {new_examples_count}/{self.min_batch_size})",
+                )
+        else:
+            if (
+                new_examples_count < self.min_batch_size
+                and corrections_count < self.min_correction_batch
+            ):
+                return CoordinationDecision(
+                    should_learn=False,
+                    strategy="balanced",
+                    reasoning=f"Batch too small (examples: {new_examples_count}/{self.min_batch_size}, corrections: {corrections_count}/{self.min_correction_batch})",
+                )
+
+        # 2. Agentic path: Ask LLM
+        try:
+            decision = self._ask_llm(buffer, current_rules)
+            if self.verbose and decision.should_learn:
+                print(f"\n🤖 Agentic decision: {decision.reasoning}")
+                print(
+                    f"   Strategy: {decision.strategy}, max iterations: {decision.max_iterations}"
+                )
+            return decision
+        except Exception as e:
+            print(f"Error in agentic coordinator: {e}")
+            # Fallback to simple heuristic
+            return CoordinationDecision(
+                should_learn=True,
+                strategy="balanced",
+                reasoning="Fallback due to agent error",
+            )
 
     def analyze_buffer(self, buffer: "ExampleBuffer") -> Dict[str, Any]:
-        raise NotImplementedError()
+        """Analyze buffer stats"""
+        return buffer.get_stats()
 
     def on_learning_complete(
         self,
@@ -223,4 +280,69 @@ class AgenticCoordinator(CoordinatorProtocol):
         new_rules: List["Rule"],
         metrics: Dict[str, Any],
     ):
-        raise NotImplementedError()
+        """Log learning results"""
+        if self.verbose:
+            accuracy = metrics.get("accuracy", 0)
+            print(f"✓ Learning complete. Agent will observe next batch.")
+
+    def _ask_llm(
+        self, buffer: "ExampleBuffer", current_rules: Optional[List["Rule"]]
+    ) -> CoordinationDecision:
+        """Construct prompt and get decision from LLM"""
+        import json
+
+        # Get sample of new data
+        new_data = buffer.get_new_examples()
+        # Limit to 10 samples for prompt context
+        samples = new_data[:10]
+
+        prompt = f"""You are the Coordinator for a rule learning system.
+Decide if we should trigger a retraining loop NOW based on new data.
+
+STATUS:
+- New examples: {len(new_data)}
+- New corrections (high priority): {len([e for e in new_data if e.is_correction])}
+- Current rules: {len(current_rules) if current_rules else 0}
+
+NEW DATA SAMPLES (up to 10):
+"""
+        for ex in samples:
+            type_str = "CORRECTION" if ex.is_correction else "EXAMPLE"
+            prompt += f"- [{type_str}] Input: {json.dumps(ex.input)} -> Output: {json.dumps(ex.output)}\n"
+
+        prompt += """
+DECISION CRITERIA:
+1. TRIGGER if we have corrections (users fixing mistakes).
+2. TRIGGER if we have a significant batch of new examples (5+).
+3. WAIT if data looks sparse or redundant.
+
+STRATEGIES:
+- 'balanced': Standard mix (default)
+- 'corrections_first': If we have corrections
+- 'diversity': If we have many similar examples
+- 'uncertain': If examples look ambiguous
+
+Return JSON:
+{
+  "should_learn": boolean,
+  "strategy": "balanced" | "corrections_first" | "diversity" | "uncertain",
+  "max_iterations": integer (1-3, use 3 for hard changes, 1 for simple),
+  "reasoning": "Short explanation"
+}
+"""
+
+        response = self.llm.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+        )
+
+        result = json.loads(response.choices[0].message.content)
+
+        return CoordinationDecision(
+            should_learn=result.get("should_learn", False),
+            strategy=result.get("strategy", "balanced"),
+            reasoning=result.get("reasoning", ""),
+            max_iterations=result.get("max_iterations", 3),
+            metadata={"source": "llm_agent"},
+        )
