@@ -691,7 +691,7 @@ Return refined ruleset in same JSON format:
         """Execute regex rule"""
 
         pattern = re.compile(rule.content)
-        context = input_data.get("context", "")
+        context = input_data.get("context", input_data.get("text", ""))
         spans = []
 
         for match in pattern.finditer(context):
@@ -716,6 +716,21 @@ Return refined ruleset in same JSON format:
 
             if extract_func:
                 results = extract_func(input_data)
+                if isinstance(results, list):
+                    if len(results) == 0:
+                        return []
+                    if isinstance(results[0], dict):
+                        spans = []
+                        for d in results:
+                            spans.append(
+                                Span(
+                                    text=d.get("text", ""),
+                                    start=int(d["start"]),
+                                    end=int(d["end"]),
+                                    score=float(d.get("score", rule.confidence)),
+                                )
+                            )
+                        return spans
                 return results
         except Exception:
             # Rules are validated during learning, so execution errors are rare
