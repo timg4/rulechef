@@ -827,8 +827,15 @@ Return refined ruleset in same JSON format:
         """Check if two outputs match based on task type"""
 
         if task_type == TaskType.EXTRACTION:
-            spans1 = output1.get("spans", [])
-            spans2 = output2.get("spans", [])
+            def _as_spans(out):
+                if isinstance(out, list):
+                    return out
+                if isinstance(out, dict):
+                    return out.get("spans", [])
+                return []   
+
+            spans1 = _as_spans(output1)
+            spans2 = _as_spans(output2)
 
             if len(spans1) != len(spans2):
                 return False
