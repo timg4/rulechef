@@ -54,6 +54,11 @@ class OpenAIObserver:
 
         # Wrap with observation
         def observed_create(*args, **kwargs):
+            msgs = kwargs.get("messages")
+            if isinstance(msgs, dict):
+                kwargs["messages"] = [msgs]
+            elif isinstance(msgs, tuple):
+                kwargs["messages"] = list(msgs)
             # Call original API
             response = self._original_create(*args, **kwargs)
 

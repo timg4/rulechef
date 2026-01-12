@@ -277,10 +277,30 @@ class RuleChef:
             print(f"\n{'=' * 60}")
             print(f"Learning complete! ({elapsed:.1f}s)")
             print(f"  Rules: {len(rules)}")
+            metrics = metrics or {}
+            metrics.setdefault("total", 0)
+            metrics.setdefault("correct", 0)
+            
+            # backward-compat: if learner returns micro_f1 but not accuracy
+            if "accuracy" not in metrics and "micro_f1" in metrics:
+                metrics["accuracy"] = float(metrics["micro_f1"])
+            
+            print(f"\n{'=' * 60}")
+            print(f"Learning complete! ({elapsed:.1f}s)")
+            print(f"  Rules: {len(rules)}")
+            
             if metrics["total"] > 0:
-                print(
-                    f"  Accuracy: {metrics['accuracy']:.1%} ({metrics['correct']}/{metrics['total']})"
-                )
+                if "micro_f1" in metrics:
+                    print(
+                        f"  micro_f1: {metrics['micro_f1']:.4f} "
+                        f"(tp={metrics.get('tp', 0)} fp={metrics.get('fp', 0)} fn={metrics.get('fn', 0)})"
+                    )
+                else:
+                    print(
+                        f"  Accuracy: {metrics['accuracy']:.1%} "
+                        f"({metrics.get('correct', 0)}/{metrics['total']})"
+                    )
+            
             print(f"{'=' * 60}\n")
 
             return rules, metrics

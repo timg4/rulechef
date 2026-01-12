@@ -1,6 +1,7 @@
 """LLM-based rule learning"""
-
+import random
 import json
+from random import random
 import re
 from typing import Dict, List, Optional, Callable, Any
 from openai import OpenAI
@@ -118,6 +119,7 @@ class RuleLearner:
         """
         correction_failures = [f for f in failures if f.get("is_correction", False)]
         other_failures = [f for f in failures if not f.get("is_correction", False)]
+        #random.shuffle(other_failures)
 
         # Always include all correction failures
         sampled = correction_failures
@@ -145,10 +147,11 @@ class RuleLearner:
         try:
             response = self.llm.chat.completions.create(
                 model=self.model,
-                max_completion_tokens=4000,
+                temperature=0,
+                max_tokens=2000,
+                response_format={"type": "json_object"},
                 messages=[{"role": "user", "content": prompt}],
-            )
-
+            )   
             result = self._parse_json(response.choices[0].message.content)
 
             # Extract rules from response
@@ -467,21 +470,16 @@ IMPORTANT: Return ONLY valid JSON. Ensure:
 
             # Evaluate
             results = self._evaluate_rules(rules, dataset)
-            accuracy = results["accuracy"]
+            score = results["micro_f1"]
+            print(f"[{iter_num}/{max_iterations}] micro_f1: {score:.4f}  (tp={results['tp']} fp={results['fp']} fn={results['fn']})")
 
-            print(
-                f"[{iter_num}/{max_iterations}] Accuracy: {accuracy:.1%} ({results['correct']}/{results['total']})"
-            )
-
-            if accuracy > best_accuracy:
+            if score > best_accuracy:
                 best_rules = rules
-                best_accuracy = accuracy
+                best_accuracy = score
 
-            # Stop if good enough
-            if accuracy >= 0.90:
-                print("✓ Achieved 90%+ accuracy!")
+            if score >= 0.90:
+                print("✓ Achieved micro-F1 >= 0.90")
                 break
-
             # Refine based on failures
             if results["failures"]:
                 print(
@@ -501,49 +499,74 @@ IMPORTANT: Return ONLY valid JSON. Ensure:
                 print("✓ No failures to fix!")
                 break
 
-        return best_rules, {
-            "accuracy": best_accuracy,
-            "total": results["total"],
-            "correct": int(best_accuracy * results["total"]),
-        }
+        return best_rules, {"micro_f1": best_accuracy, "total": results["total"]}   
 
     def _evaluate_rules(self, rules: List[Rule], dataset: Dataset) -> Dict:
-        """Test rules on all training data"""
-
         all_data = dataset.get_all_training_data()
-        total = len(all_data)
-        correct = 0
+
+        tp_total = fp_total = fn_total = 0
         failures = []
 
-        for item in all_data:
-            # Apply rules
-            extracted = self._apply_rules(rules, item.input)
-            expected = item.expected_output
-
-            # Check correctness
-            if self._outputs_match(extracted, expected, dataset.task.type):
-                correct += 1
-                if hasattr(item, "update_stats"):
-                    # Update rule stats
-                    for rule in rules:
-                        rule.update_stats(True)
+        def norm_spans(out):
+            if isinstance(out, dict):
+                spans = out.get("spans", [])
+            elif isinstance(out, list):
+                spans = out
             else:
-                failures.append(
-                    {
-                        "input": item.input,
-                        "expected": expected,
-                        "got": extracted,
-                        "is_correction": isinstance(item, Correction),
-                    }
-                )
-                if hasattr(item, "update_stats"):
-                    for rule in rules:
-                        rule.update_stats(False)
+                spans = []
+            norm = []
+            for s in spans:
+                if isinstance(s, Span):
+                    norm.append((int(s.start), int(s.end)))
+                else:
+                    norm.append((int(s["start"]), int(s["end"])))
+            return set(norm)
+
+        for item in all_data:
+            pred = self._apply_rules(rules, item.input)
+            gold = item.expected_output
+
+            p = norm_spans(pred)
+            g = norm_spans(gold)
+
+            tp = len(p & g)
+            fp = len(p - g)
+            fn = len(g - p)
+
+            tp_total += tp
+            fp_total += fp
+            fn_total += fn
+
+            # sentence-level f1 (for ranking failures)
+            denom = (2 * tp + fp + fn)
+            sent_f1 = (2 * tp / denom) if denom > 0 else 1.0
+
+            if sent_f1 < 1.0:
+                # store a SMALL failure object (avoid prompt blow-up)
+                ctx = item.input.get("context", item.input.get("text", ""))
+                ctx = ctx[:800]  # hard truncate to keep prompts small
+
+                failures.append({
+                    "input": {"context": ctx},
+                    "f1": sent_f1,
+                    "false_positives": sorted(list(p - g))[:20],
+                    "false_negatives": sorted(list(g - p))[:20],
+                    "is_correction": isinstance(item, Correction),
+                })
+
+        micro_denom = (2 * tp_total + fp_total + fn_total)
+        micro_f1 = (2 * tp_total / micro_denom) if micro_denom > 0 else 1.0
+
+        # keep only worst failures for refinement
+        failures.sort(key=lambda x: x["f1"])
+        failures = failures[:50]
 
         return {
-            "total": total,
-            "correct": correct,
-            "accuracy": correct / total if total > 0 else 0.0,
+            "total": len(all_data),
+            "micro_f1": micro_f1,
+            "tp": tp_total,
+            "fp": fp_total,
+            "fn": fn_total,
             "failures": failures,
         }
 
@@ -585,9 +608,11 @@ Return refined ruleset in same JSON format:
         try:
             response = self.llm.chat.completions.create(
                 model=self.model,
+                temperature=0,
+                max_tokens=2000,
+                response_format={"type": "json_object"},
                 messages=[{"role": "user", "content": prompt}],
-            )
-
+            )   
             result = self._parse_json(response.choices[0].message.content)
 
             # Extract refined rules
@@ -656,14 +681,28 @@ Return refined ruleset in same JSON format:
         first_result = all_results[0]
 
         if isinstance(first_result, list) and (
-            not first_result or isinstance(first_result[0], Span)
-        ):
-            # It's a list of Spans (Extraction)
+            not first_result or isinstance(first_result[0], (Span, dict))
+):      
             all_spans = []
+        
             for res in all_results:
-                if isinstance(res, list):
-                    all_spans.extend(res)
+                if not isinstance(res, list):
+                    continue
 
+                for sp in res:
+                    if isinstance(sp, Span):
+                        all_spans.append(sp)
+                    elif isinstance(sp, dict):
+                        # dict -> Span (this is what your CODE rules return)
+                        all_spans.append(
+                            Span(
+                                text=sp.get("text", ""),
+                                start=int(sp["start"]),
+                                end=int(sp["end"]),
+                                score=float(sp.get("score", 0.5)),
+                            )
+                        )
+        
             unique_spans = self._deduplicate_spans(all_spans)
             return {"spans": [s.to_dict() for s in unique_spans]}
 
@@ -695,12 +734,16 @@ Return refined ruleset in same JSON format:
         spans = []
 
         for match in pattern.finditer(context):
+        # CRITICAL: skip zero-length matches -> otherwise you get a match at every char position
+            if match.start() == match.end():
+                continue
+        
             spans.append(
                 Span(
-                    text=match.group(),
-                    start=match.start(),
-                    end=match.end(),
-                    score=rule.confidence,
+                text=match.group(),
+                start=match.start(),
+                end=match.end(),
+                score=rule.confidence,
                 )
             )
 
@@ -834,7 +877,7 @@ Return refined ruleset in same JSON format:
             if not is_dup:
                 unique.append(span)
 
-        return unique[:5]
+        return unique
 
     def _outputs_match(
         self, output1: Dict, output2: Dict, task_type: TaskType = TaskType.EXTRACTION
@@ -894,7 +937,7 @@ Return refined ruleset in same JSON format:
 
     def _parse_json(self, text: str) -> Dict:
         """Parse JSON from LLM response with error handling"""
-
+        
         # Extract JSON from markdown code blocks
         if "```json" in text:
             text = text.split("```json")[1].split("```")[0]
@@ -951,7 +994,10 @@ Example #{seed + 1}:"""
         try:
             if rule.format == RuleFormat.REGEX:
                 # Test compile regex pattern
-                re.compile(rule.content)
+                compiled = re.compile(rule.content)
+                if compiled.search("") is not None:
+                    print("Regex matches empty string -> rejected (would explode predictions)")
+                    return False
             elif rule.format == RuleFormat.CODE:
                 # Test syntax of Python code
                 compile(rule.content, "<string>", "exec")
