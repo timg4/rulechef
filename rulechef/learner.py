@@ -976,6 +976,8 @@ Example #{seed + 1}:"""
         response = self.llm.chat.completions.create(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
+            response_format={"type":"json_object"},
+            temperature=0
         )
 
         text = response.choices[0].message.content
@@ -998,6 +1000,8 @@ Example #{seed + 1}:"""
                 if compiled.search("") is not None:
                     print("Regex matches empty string -> rejected (would explode predictions)")
                     return False
+            
+                    
             elif rule.format == RuleFormat.CODE:
                 # Test syntax of Python code
                 compile(rule.content, "<string>", "exec")
